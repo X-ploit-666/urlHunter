@@ -1,222 +1,354 @@
-#!/usr/bin/bash
+#!/usr/bin/env bash
+
 # ============================================================
-# URLHunter
-# Automated URL Discovery & XSS Recon Pipeline
+# URLHunter v2
+# Automated Bug Bounty Recon Framework
 #
 # Author  : X-ploit-666
-# Version : 1.0.0
-# GitHub  : https://github.com/X-ploit-666
+# Version : 2.0.0
+#
+# Purpose:
+#   - Historical URL discovery
+#   - Host discovery
+#   - Live asset validation
+#   - Endpoint crawling
+#   - JS/API/Parameter discovery
+#
 # ============================================================
+set -Eeuo pipefail
+VERSION="2.0.0"
 
-set -euo pipefail
-VERSION="1.0.0"
-source colors.sh
-trap 'echo -e "\n${red}[!] Interrupted by user${reset}"; exit 1' INT
 
-echo -e "${cyan}URLHunter v${VERSION}${reset}"
+# =========================
+# Colors
+# =========================
 
-echo -e "${dim}==============================================${reset}"
-echo -e "${red}${bold}"
-toilet -f standard "URLHunter"
+if [[ -f "colors.sh" ]]; then
+    source colors.sh
+else
+    red="\033[31m"
+    green="\033[32m"
+    yellow="\033[33m"
+    cyan="\033[36m"
+    reset="\033[0m"
+fi
+trap 'echo -e "\n${red}[!] Interrupted${reset}"; exit 1' INT
+
+
+# =========================
+# Banner
+# =========================
+
+echo -e "${cyan}"
+echo "=============================================="
+echo "              URLHunter v${VERSION}"
+echo " Automated Bug Bounty Recon Framework"
+echo "=============================================="
 echo -e "${reset}"
-echo -e "${dim}==============================================${reset}"
-echo -e "${dim}Automated URL Discovery & XSS Recon Pipeline${reset}"
-echo ""
-# Checks
-if [[ $# -ne 1 || ! -f $1 ]]; then
-    echo -e "${red}[!] Usage${reset}\n$0 <domains-file.txt>"
+
+# =========================
+# Configuration
+# =========================
+
+INPUT="${1:-}"
+if [[ -z "$INPUT" || ! -f "$INPUT" ]]; then
+    echo -e "${red}[!] Usage:${reset}"
+    echo "$0 domains.txt"
     exit 1
-fi 
+fi
 
-input=$1
-OUTPUT_DIR="output"
-mkdir -p "$OUTPUT_DIR"
+OUTPUT="output"
+COLLECTION="$OUTPUT/collection"
+HOSTS="$OUTPUT/hosts"
+CRAWL="$OUTPUT/crawl"
+ENDPOINTS="$OUTPUT/endpoints"
+LOGS="$OUTPUT/logs"
 
-tools=(
+mkdir -p \
+"$COLLECTION" \
+"$HOSTS" \
+"$CRAWL" \
+"$ENDPOINTS" \
+"$LOGS"
+
+LOGFILE="$LOGS/run.log"
+exec > >(tee -a "$LOGFILE") 2>&1
+
+# =========================
+# Tool Check
+# =========================
+
+TOOLS=(
 waybackurls
 gau
 httpx
 katana
-gf
 uro
-Gxss
-kxss
-dalfox
+unfurl
+
 )
 
-echo -e "${cyan}[+]${reset} Checking dependencies..."
+echo -e "${cyan}[+] Checking dependencies...${reset}"
 
-for tool in "${tools[@]}"; do
-    if ! command -v "$tool" &>/dev/null; then
-        echo -e "${red}[!] Missing dependency: $tool${reset}"
+for tool in "${TOOLS[@]}"; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+
+        echo -e "${red}[!] Missing:${reset} $tool"
         exit 1
     fi
 done
 
-echo -e "${green}[✓]${reset} All dependencies installed"
-echo ""
 
-rm -f "$OUTPUT_DIR"/*.txt 2>/dev/null || true
-final_count=0
+echo -e "${green}[✓] Dependencies OK${reset}"
 
-## URL Collection Phase
-echo -e "${cyan}[+]${reset} Gathering Links From Targets..."
-
-# Collect historical URLs from Wayback Machine
-echo -e "${cyan}[+]${reset} Gathering URLs From waybackurls..."
-waybackurls < "$input" 2>/dev/null > "$OUTPUT_DIR/wayback_urls.txt"
-wayback_count=$(wc -l < "$OUTPUT_DIR/wayback_urls.txt")
-echo -e "${green}[✓]${reset} $wayback_count URLs gathered and saved in $OUTPUT_DIR/wayback_urls.txt"
-echo ""
-
-# Collect additional URLs from GAU (GetAllUrls)
-echo -e "${cyan}[+]${reset} Gathering URLs From gau..."
-gau < "$input" 2>/dev/null > "$OUTPUT_DIR/gau.txt"
-gau_count=$(wc -l < "$OUTPUT_DIR/gau.txt")
-echo -e "${green}[✓]${reset} $gau_count URLs gathered and saved in $OUTPUT_DIR/gau.txt"
-echo ""
-
-
-## URL Normalization and Deduplication
-echo -e "${cyan}[+]${reset} Combining All Gathered URLs..."
-cat "$OUTPUT_DIR/wayback_urls.txt" "$OUTPUT_DIR/gau.txt" | sort -u > "$OUTPUT_DIR/all_urls.txt"
-unique_count=$(wc -l < "$OUTPUT_DIR/all_urls.txt")
-
-echo -e "${green}[✓]${reset} $unique_count unique URLs saved in $OUTPUT_DIR/all_urls.txt"
-echo ""
-
-## Target Scope Validation
-echo -e "${cyan}[+]${reset} Filtering In-Scope URLs..."
-> "$OUTPUT_DIR/scoped_urls.txt"
-
-while read -r domain; do
-
-    # Skip empty lines and comments
-    [[ -z "$domain" ]] && continue
-    [[ "$domain" =~ ^# ]] && continue
-
-    # Remove protocol and trailing slash
-    domain=$(echo "$domain" | sed -E 's#https?://##; s#/.*##; s#/$##')
-    # Escape dots for regex safety
-    domain=$(echo "$domain" | sed 's/\./\\./g')
-
-    grep -E "https?://([a-zA-Z0-9-]+\.)*${domain}(/|$)" \
-    "$OUTPUT_DIR/all_urls.txt" >> "$OUTPUT_DIR/scoped_urls.txt" || true
-done < "$input"
-
-sort -u "$OUTPUT_DIR/scoped_urls.txt" -o "$OUTPUT_DIR/scoped_urls.txt"
-scope_count=$(wc -l < "$OUTPUT_DIR/scoped_urls.txt")
-echo -e "${green}[✓]${reset} $scope_count URLs are in scope and saved in $OUTPUT_DIR/scoped_urls.txt"
+# =========================
+# Phase 1
+# URL Collection
+# =========================
 
 echo ""
+echo -e "${cyan}[+] Collecting historical URLs${reset}"
 
-## Live Host Verification
-echo -e "${cyan}[+]${reset} Checking for Live URLs..."
-cat "$OUTPUT_DIR/scoped_urls.txt" \
-| httpx -silent -mc 200,301,302,307,308,401,403,429 \
-| sort -u > "$OUTPUT_DIR/live_urls.txt"
-live_count=$(wc -l < "$OUTPUT_DIR/live_urls.txt")
-echo -e "${green}[✓]${reset} $live_count live URLs saved in $OUTPUT_DIR/live_urls.txt"
-echo ""
-
-
-
-if [[ ! -s "$OUTPUT_DIR/live_urls.txt" ]]; then
-    echo -e "${red}[!]${reset} No live URLs found."
-    exit 0
-fi
-
-## Active Crawling and Endpoint Discovery
-echo -e "${cyan}[+]${reset} Crawling Live URLs With Katana..."
-katana -list "$OUTPUT_DIR/live_urls.txt" -jc -d 3 -kf all -silent -o "$OUTPUT_DIR/katana.txt" 2>/dev/null
-# alternative: suppress all katana output
-if [[ -f "$OUTPUT_DIR/katana.txt" ]]; then
-    katana_count=$(wc -l < "$OUTPUT_DIR/katana.txt")
+if [[ ! -s "$COLLECTION/wayback.txt" ]]; then
+    waybackurls < "$INPUT" \
+    > "$COLLECTION/wayback.txt" 2>/dev/null &
 else
-    katana_count=0
-    touch "$OUTPUT_DIR/katana.txt"
+    echo "[+] Using existing wayback.txt"
 fi
 
-echo -e "${green}[✓]${reset} $katana_count URLs gathered and saved in $OUTPUT_DIR/katana.txt"
+if [[ ! -s "$COLLECTION/gau.txt" ]]; then
+    gau < "$INPUT" \
+    > "$COLLECTION/gau.txt" 2>/dev/null &
+else
+    echo "[+] Using existing gau.txt"
+fi
+
+wait
+
+cat \
+"$COLLECTION/wayback.txt" \
+"$COLLECTION/gau.txt" \
+| sort -u \
+> "$COLLECTION/all_urls.txt"
+
+echo -e "${green}[✓] URLs collected:${reset} $(wc -l < "$COLLECTION/all_urls.txt")"
+
+# =========================
+# Phase 2
+# URL Cleaning
+# =========================
+
 echo ""
+echo -e "${cyan}[+] Normalizing URLs${reset}"
 
-## Merge Crawled and Discovered URLs
-cat "$OUTPUT_DIR/live_urls.txt" "$OUTPUT_DIR/katana.txt" | sort -u > "$OUTPUT_DIR/katana_merge.txt"
-
-> "$OUTPUT_DIR/final_live_urls.txt"
-
-while read -r domain; do
-    [[ -z "$domain" ]] && continue
-    [[ "$domain" =~ ^# ]] && continue
-    domain=$(echo "$domain" | sed -E 's#https?://##; s#/.*##; s#/$##')
-    domain=$(echo "$domain" | sed 's/\./\\./g')
-    grep -E "https?://([a-zA-Z0-9-]+\.)*${domain}(/|$)" "$OUTPUT_DIR/katana_merge.txt" >> "$OUTPUT_DIR/final_live_urls.txt" || true
-done < "$input"
-
-sort -u "$OUTPUT_DIR/final_live_urls.txt" -o "$OUTPUT_DIR/final_live_urls.txt"
-rm "$OUTPUT_DIR/katana_merge.txt"
-live_count=$(wc -l < "$OUTPUT_DIR/final_live_urls.txt")
-echo -e "${green}[✓]${reset} $live_count total live URLs after Katana saved in $OUTPUT_DIR/final_live_urls.txt"
-echo ""
-
-
-## XSS Parameter Discovery Pipeline
-echo -e "${magenta}[⚡]${reset} Preparing URLs for XSS..."
-
-> "$OUTPUT_DIR/dalfox_targets.txt"
-
-cat "$OUTPUT_DIR/final_live_urls.txt" \
-| gf xss \
+cat "$COLLECTION/all_urls.txt" \
 | uro \
 | sort -u \
-| Gxss \
-| kxss \
-| tee "$OUTPUT_DIR/xss_output.txt"
+> "$COLLECTION/clean_urls.txt"
+
+echo -e "${green}[✓] Clean URLs:${reset} $(wc -l < "$COLLECTION/clean_urls.txt")"
 
 
-if [ -s "$OUTPUT_DIR/xss_output.txt" ]; then
-    grep -oP 'https?://\S+' "$OUTPUT_DIR/xss_output.txt" \
-    | sed 's/=.*/=/' \
-    | sort -u > "$OUTPUT_DIR/dalfox_targets.txt"
 
-    final_count=$(wc -l < "$OUTPUT_DIR/dalfox_targets.txt")
-    echo -e "${green}[✓]${reset} $final_count URLs ready for Dalfox saved in $OUTPUT_DIR/dalfox_targets.txt"
-
-else
-    echo -e "${red}[-] No URLs extracted from XSS output.${reset}"
-fi
-
-if [[ -s "$OUTPUT_DIR/dalfox_targets.txt" ]]; then
-    echo -e "${red}[☠]${reset} Starting Dalfox..."
-    dalfox file "$OUTPUT_DIR/dalfox_targets.txt" -o "$OUTPUT_DIR/dalfox_results.txt" --silence || true
-else
-    echo -e "${red}[-] No Dalfox targets found.${reset}"
-    exit 0
-fi
-
-if [[ -s "$OUTPUT_DIR/dalfox_results.txt" ]]; then
-    echo -e "${red}[☠] XSS findings saved in $OUTPUT_DIR/dalfox_results.txt${reset}"
-else
-    echo -e "${green}[✓] No XSS findings detected${reset}"
-fi
+# =========================
+# Phase 3
+# Extract Hosts
+# =========================
 
 
 echo ""
+echo -e "${cyan}[+] Extracting hosts${reset}"
 
-## Execution Summary
+cat "$COLLECTION/clean_urls.txt" \
+| unfurl domains \
+| sort -u \
+> "$HOSTS/all_hosts.txt"
+
+echo -e "${green}[✓] Hosts:${reset} $(wc -l < "$HOSTS/all_hosts.txt")"
+
+# =========================
+# Phase 4
+# Live Hosts
+# ========================
+
+echo ""
+echo -e "${cyan}[+] Checking live hosts${reset}"
+
+if [[ ! -s "$HOSTS/live_hosts.txt" ]]; then
+    cat "$HOSTS/all_hosts.txt" \
+    | httpx \
+        -silent \
+        -follow-redirects \
+        -status-code \
+        -title \
+    > "$HOSTS/live_hosts.txt"
+else
+    echo "[+] Using existing live_hosts.txt"
+fi
+
+cat "$HOSTS/live_hosts.txt" \
+| awk '{print $1}' \
+| sort -u \
+> "$HOSTS/live_urls.txt"
+
+echo -e "${green}[✓] Live hosts:${reset} $(wc -l < "$HOSTS/live_urls.txt")"
+
+# =========================
+# Phase 5
+# Active Crawling
+# =========================
+echo ""
+echo -e "${cyan}[+] Crawling live targets with Katana${reset}"
+
+if [[ ! -s "$CRAWL/katana.txt" ]]; then
+    katana \
+    -list "$HOSTS/live_urls.txt" \
+    -jc \
+    -jsl \
+    -d 3 \
+    -kf all \
+    -silent \
+    -o "$CRAWL/katana.txt"
+else
+    echo "[+] Using existing katana results"
+fi
+
+sort -u "$CRAWL/katana.txt" \
+> "$CRAWL/all_crawled.txt"
+
+echo -e "${green}[✓] Crawled URLs:${reset} $(wc -l < "$CRAWL/all_crawled.txt")"
+
+# =========================
+# Phase 6
+# JavaScript Discovery
+# =========================
+
+echo ""
+echo -e "${cyan}[+] Extracting JavaScript files${reset}"
+
+grep -Ei "\.js(\?|$)" \
+"$CRAWL/all_crawled.txt" \
+| sort -u \
+> "$CRAWL/javascript_files.txt"
+
+echo -e "${green}[✓] JS files:${reset} $(wc -l < "$CRAWL/javascript_files.txt")"
+
+
+# =========================
+# Phase 7
+# Endpoint Database
+# =========================
+
+echo ""
+echo -e "${cyan}[+] Building endpoint database${reset}"
+
+cat \
+"$COLLECTION/clean_urls.txt" \
+"$CRAWL/all_crawled.txt" \
+| sort -u \
+> "$ENDPOINTS/all_endpoints.txt"
+
+echo -e "${green}[✓] Endpoints:${reset} $(wc -l < "$ENDPOINTS/all_endpoints.txt")"
+
+# =========================
+# Phase 8
+# API Discovery
+# ========================
+
+echo ""
+echo -e "${cyan}[+] Searching API endpoints${reset}"
+
+grep -Ei \
+"/api/|/v[0-9]+/|graphql|swagger|openapi|rest|json" \
+"$ENDPOINTS/all_endpoints.txt" \
+| sort -u \
+> "$ENDPOINTS/api_endpoints.txt"
+echo -e "${green}[✓] API endpoints:${reset} $(wc -l < "$ENDPOINTS/api_endpoints.txt")"
+
+# =========================
+# Phase 9
+# Parameter Discovery
+# =========================
+
+
+echo ""
+echo -e "${cyan}[+] Extracting parameters${reset}"
+
+grep "?" \
+"$ENDPOINTS/all_endpoints.txt" \
+| sort -u \
+> "$ENDPOINTS/parameter_urls.txt"
+
+if [[ -s "$ENDPOINTS/parameter_urls.txt" ]]; then
+    cat "$ENDPOINTS/parameter_urls.txt" \
+    | unfurl keys \
+    | sort -u \
+    > "$ENDPOINTS/parameters.txt"
+else
+    touch "$ENDPOINTS/parameters.txt"
+fi
+
+echo -e "${green}[✓] Parameters:${reset} $(wc -l < "$ENDPOINTS/parameters.txt")"
+
+# =========================
+# Phase 10
+# Final Recon Database
+# =========================
+
+echo ""
+echo -e "${cyan}[+] Creating final URL database${reset}"
+cat \
+"$COLLECTION/clean_urls.txt" \
+"$CRAWL/all_crawled.txt" \
+| sort -u \
+> "$OUTPUT/final_urls.txt"
+
+echo -e "${green}[✓] Final URLs:${reset} $(wc -l < "$OUTPUT/final_urls.txt")"
+
+
+# =========================
+# Summary
+# =========================
+
+echo ""
+
+
 echo -e "${cyan}"
-figlet -f script "Summary"
+echo "=============================================="
+echo "              URLHunter Summary"
+echo "=============================================="
 echo -e "${reset}"
+
+echo -e "${green}Collection${reset}"
+echo " Wayback URLs       : $(wc -l < "$COLLECTION/wayback.txt")"
+echo " GAU URLs            : $(wc -l < "$COLLECTION/gau.txt")"
+echo " Clean URLs          : $(wc -l < "$COLLECTION/clean_urls.txt")"
+
 echo ""
 
-echo -e "${cyan}$OUTPUT_DIR/wayback_urls.txt${reset} ---> ${green}$wayback_count URLs${reset}"
-echo -e "${cyan}$OUTPUT_DIR/gau.txt${reset} ---> ${green}$gau_count URLs${reset}"
-echo -e "${cyan}$OUTPUT_DIR/katana.txt${reset} ---> ${green}$katana_count URLs${reset}"
-echo -e "${cyan}$OUTPUT_DIR/all_urls.txt${reset} ---> ${green}$unique_count unique URLs${reset}"
-echo -e "${cyan}$OUTPUT_DIR/final_live_urls.txt${reset} ---> ${green}$live_count live URLs${reset}"
-echo -e "${cyan}$OUTPUT_DIR/dalfox_targets.txt${reset} ---> ${green}$final_count XSS targets${reset}"
-echo -e "${cyan}$OUTPUT_DIR/scoped_urls.txt${reset} ---> ${green}$scope_count in-scope URLs${reset}"
+echo -e "${green}Hosts${reset}"
+echo " All hosts           : $(wc -l < "$HOSTS/all_hosts.txt")"
+echo " Live hosts          : $(wc -l < "$HOSTS/live_urls.txt")"
+
+echo ""
+
+echo -e "${green}Crawler${reset}"
+echo " Crawled URLs        : $(wc -l < "$CRAWL/all_crawled.txt")"
+echo " JavaScript files    : $(wc -l < "$CRAWL/javascript_files.txt")"
+
+echo ""
+
+echo -e "${green}Endpoints${reset}"
+echo " Total endpoints     : $(wc -l < "$ENDPOINTS/all_endpoints.txt")"
+echo " API endpoints       : $(wc -l < "$ENDPOINTS/api_endpoints.txt")"
+echo " Parameters           : $(wc -l < "$ENDPOINTS/parameters.txt")"
+
+echo ""
+
+echo -e "${cyan}"
+echo "Output directory:"
+echo "$OUTPUT"
+echo -e "${reset}"
 
 echo ""
 echo -e "${dim}URLHunter v${VERSION} | X-ploit-666${reset}"
-echo ""
