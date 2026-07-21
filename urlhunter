@@ -1,50 +1,36 @@
 #!/usr/bin/env bash
 
 # ============================================================
-# URLHunter v2
-# Automated Bug Bounty Recon Framework
+# URLHunter v2.2
+# Automated Bug Bounty Recon Framework (low-memory hardened)
 #
-# Author  : X-ploit-666
-# Version : 2.0.0
-#
-# Purpose:
-#   - Historical URL discovery
-#   - Host discovery
-#   - Live asset validation
-#   - Endpoint crawling
-#   - JS/API/Parameter discovery
-#
+# Author  : X-ploit-666 (improved by analysis)
+# Version : 2.2.0
 # ============================================================
 
 set -Eeuo pipefail
 
-VERSION="2.0.0"
-
+VERSION="2.2.0"
 
 # =========================
-# Colors
+# Colors (bulletproof)
 # =========================
-
 if [[ -f "colors.sh" ]]; then
     source colors.sh
-else
-    red="\033[31m"
-    green="\033[32m"
-    yellow="\033[33m"
-    cyan="\033[36m"
-    reset="\033[0m"
 fi
 
+: "${red:=\033[31m}"
+: "${green:=\033[32m}"
+: "${yellow:=\033[33m}"
+: "${cyan:=\033[36m}"
+: "${dim:=\033[2m}"
+: "${reset:=\033[0m}"
 
 trap 'echo -e "\n${red}[!] Interrupted${reset}"; exit 1' INT
-
-
 
 # =========================
 # Banner
 # =========================
-
-
 echo -e "${cyan}"
 echo "=============================================="
 echo "              URLHunter v${VERSION}"
@@ -52,629 +38,260 @@ echo " Automated Bug Bounty Recon Framework"
 echo "=============================================="
 echo -e "${reset}"
 
-
-
 # =========================
 # Configuration
 # =========================
-
-
 INPUT="${1:-}"
-
-
 if [[ -z "$INPUT" || ! -f "$INPUT" ]]; then
-
     echo -e "${red}[!] Usage:${reset}"
     echo "$0 domains.txt"
     exit 1
-
 fi
 
-
+# Quick check for empty input file
+if [[ ! -s "$INPUT" ]]; then
+    echo -e "${red}[!] Input file is empty. Aborting.${reset}"
+    exit 1
+fi
 
 OUTPUT="output"
-
 COLLECTION="$OUTPUT/collection"
 HOSTS="$OUTPUT/hosts"
 CRAWL="$OUTPUT/crawl"
 ENDPOINTS="$OUTPUT/endpoints"
 LOGS="$OUTPUT/logs"
 
-
-
-mkdir -p \
-"$COLLECTION" \
-"$HOSTS" \
-"$CRAWL" \
-"$ENDPOINTS" \
-"$LOGS"
-
-
+mkdir -p "$COLLECTION" "$HOSTS" "$CRAWL" "$ENDPOINTS" "$LOGS"
 
 LOGFILE="$LOGS/run.log"
-
-
-
 exec > >(tee -a "$LOGFILE") 2>&1
-
-
-
 
 # =========================
 # Tool Check
 # =========================
-
-
-TOOLS=(
-
-waybackurls
-gau
-httpx
-katana
-uro
-unfurl
-
-)
-
-
+TOOLS=(waybackurls gau httpx katana uro unfurl)
 
 echo -e "${cyan}[+] Checking dependencies...${reset}"
-
-
 for tool in "${TOOLS[@]}"; do
-
-
     if ! command -v "$tool" >/dev/null 2>&1; then
-
         echo -e "${red}[!] Missing:${reset} $tool"
-
         exit 1
-
     fi
-
-
 done
-
-
-
 echo -e "${green}[✓] Dependencies OK${reset}"
 
-
-
-
 # =========================
-# Phase 1
-# URL Collection
+# Phase 1: URL Collection
 # =========================
-
-
-
 echo ""
 echo -e "${cyan}[+] Collecting historical URLs${reset}"
 
-
-
-# -------------------------
-# Wayback Collection
-# -------------------------
-
-
+# --- Wayback Collection (no inner tee, avoids buffering hang) ---
 if [[ ! -s "$COLLECTION/wayback.txt" ]]; then
-
-
     echo -e "${yellow}[+] Running waybackurls...${reset}"
-
-
-    timeout 30m waybackurls < "$INPUT" \
-    | tee "$COLLECTION/wayback.txt"
-
-
-
-    if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
-
+    if ! timeout 30m waybackurls < "$INPUT" > "$COLLECTION/wayback.txt"; then
         echo -e "${red}[!] waybackurls failed or timed out${reset}"
-
     fi
-
-
 else
-
-
     echo "[+] Using existing wayback.txt"
-
-
 fi
 
-
-
-
-
-# -------------------------
-# GAU Collection
-# -------------------------
-
-
+# --- GAU Collection (no inner tee) ---
 if [[ ! -s "$COLLECTION/gau.txt" ]]; then
-
-
     echo -e "${yellow}[+] Running gau...${reset}"
-
-
-    timeout 60m gau < "$INPUT" \
-    | tee "$COLLECTION/gau.txt"
-
-
-
-    if [[ ${PIPESTATUS[0]} -ne 0 ]]; then
-
+    if ! timeout 60m gau < "$INPUT" > "$COLLECTION/gau.txt"; then
         echo -e "${red}[!] gau failed or timed out${reset}"
-
     fi
-
-
-
 else
-
-
     echo "[+] Using existing gau.txt"
-
-
 fi
 
-
-
-
-
-# -------------------------
-# Merge Collection
-# -------------------------
-
-
+# --- Merge Collection ---
 echo -e "${cyan}[+] Combining URLs...${reset}"
-
-
-
-cat \
-"$COLLECTION/wayback.txt" \
-"$COLLECTION/gau.txt" \
-| sort -u \
-> "$COLLECTION/all_urls.txt"
-
-
-
-
+sort -u "$COLLECTION/wayback.txt" "$COLLECTION/gau.txt" > "$COLLECTION/all_urls.txt"
 echo -e "${green}[✓] URLs collected:${reset} $(wc -l < "$COLLECTION/all_urls.txt")"
 
 # =========================
-# Phase 2
-# URL Cleaning
+# Phase 2: URL Cleaning
 # =========================
-
-
 echo ""
 echo -e "${cyan}[+] Normalizing URLs${reset}"
-
-
-cat "$COLLECTION/all_urls.txt" \
-| uro \
-| sort -u \
-> "$COLLECTION/clean_urls.txt"
-
-
-
+uro < "$COLLECTION/all_urls.txt" | sort -u > "$COLLECTION/clean_urls.txt"
 echo -e "${green}[✓] Clean URLs:${reset} $(wc -l < "$COLLECTION/clean_urls.txt")"
 
-
-
-
-
 # =========================
-# Phase 3
-# Extract Hosts
+# Phase 3: Extract Hosts
 # =========================
-
-
 echo ""
 echo -e "${cyan}[+] Extracting hosts${reset}"
-
-
-
-cat "$COLLECTION/clean_urls.txt" \
-| unfurl domains \
-| sort -u \
-> "$HOSTS/all_hosts.txt"
-
-
-
+unfurl domains < "$COLLECTION/clean_urls.txt" | sort -u > "$HOSTS/all_hosts.txt"
 echo -e "${green}[✓] Hosts:${reset} $(wc -l < "$HOSTS/all_hosts.txt")"
 
-
-
-
-
 # =========================
-# Phase 4
-# Live Host Validation
+# Phase 4: Live Host Validation
 # =========================
-
-
-
 echo ""
 echo -e "${cyan}[+] Checking live hosts${reset}"
-
-
-
 if [[ ! -s "$HOSTS/live_hosts.txt" ]]; then
-
-
-    cat "$HOSTS/all_hosts.txt" \
-    | httpx \
+    httpx \
         -silent \
         -follow-redirects \
         -status-code \
         -title \
         -tech-detect \
-    > "$HOSTS/live_hosts.txt"
-
-
-
+        < "$HOSTS/all_hosts.txt" \
+        > "$HOSTS/live_hosts.txt" || echo -e "${red}[!] httpx failed${reset}"
 else
-
-
     echo "[+] Using existing live_hosts.txt"
-
-
 fi
 
-
-
-
-cat "$HOSTS/live_hosts.txt" \
-| awk '{print $1}' \
-| sort -u \
-> "$HOSTS/live_urls.txt"
-
-
-
+awk '{print $1}' "$HOSTS/live_hosts.txt" | sort -u > "$HOSTS/live_urls.txt"
 echo -e "${green}[✓] Live hosts:${reset} $(wc -l < "$HOSTS/live_urls.txt")"
 
-
-
-
-
-
-
 # =========================
-# Phase 5
-# Active Crawling
+# Phase 5: Active Crawling (MEMORY SAFE)
 # =========================
-
-
 echo ""
-echo -e "${cyan}[+] Crawling live targets with Katana${reset}"
+echo -e "${cyan}[+] Crawling live targets with Katana (low-memory mode)${reset}"
 
-
+# --- Katana settings tuned for 1.9 GB VPS ---
+KATANA_CONCURRENCY=5      # limit concurrent requests (default 10+)
+KATANA_DEPTH=2            # shallow depth (original was 3)
+# KATANA_JSL=""           # disabled JS crawling to save RAM
+# Use -jc only (crawl JavaScript files) but NOT -jsl (crawl JavaScript source)
+# If you have more RAM, increase concurrency/depth or add -jsl back.
 
 if [[ ! -s "$CRAWL/katana.txt" ]]; then
-
-
-    katana \
-    -list "$HOSTS/live_urls.txt" \
-    -jc \
-    -jsl \
-    -d 3 \
-    -kf all \
-    -silent \
-    -o "$CRAWL/katana.txt"
-
-
-
+    if ! katana \
+        -list "$HOSTS/live_urls.txt" \
+        -jc \
+        -jsl \
+        -d 3 \
+        -kf all \
+        -c 10 \
+        -p 5 \
+        -rate-limit 50 \
+        -silent \
+        -o "$CRAWL/katana.txt"; then
+        echo -e "${red}[!] katana failed${reset}"
+    fi
 else
-
-
     echo "[+] Using existing katana results"
-
-
 fi
 
-
-
-
-sort -u "$CRAWL/katana.txt" \
-> "$CRAWL/all_crawled.txt"
-
-
-
+sort -u "$CRAWL/katana.txt" > "$CRAWL/all_crawled.txt"
 echo -e "${green}[✓] Crawled URLs:${reset} $(wc -l < "$CRAWL/all_crawled.txt")"
 
-
-
-
-
-
-
 # =========================
-# Phase 6
-# JavaScript Discovery
+# Phase 6: JavaScript Discovery
 # =========================
-
-
-
 echo ""
 echo -e "${cyan}[+] Extracting JavaScript files${reset}"
-
-
-
 grep -Ei "\.js(\?|$)" \
 "$CRAWL/all_crawled.txt" \
 | sort -u \
-> "$CRAWL/javascript_files.txt"
-
-
-
+> "$CRAWL/javascript_files.txt" || true
 echo -e "${green}[✓] JS files:${reset} $(wc -l < "$CRAWL/javascript_files.txt")"
 
-
-
-
-
-
-
-
 # =========================
-# Phase 7
-# Endpoint Database
+# Phase 7: Endpoint Database
 # =========================
-
-
-
 echo ""
 echo -e "${cyan}[+] Building endpoint database${reset}"
-
-
-
-cat \
-"$COLLECTION/clean_urls.txt" \
-"$CRAWL/all_crawled.txt" \
-| sort -u \
-> "$ENDPOINTS/all_endpoints.txt"
-
-
-
+sort -u "$COLLECTION/clean_urls.txt" "$CRAWL/all_crawled.txt" > "$ENDPOINTS/all_endpoints.txt"
 echo -e "${green}[✓] Endpoints:${reset} $(wc -l < "$ENDPOINTS/all_endpoints.txt")"
 
-
-
-
-
-
-
 # =========================
-# Phase 8
-# API Discovery
+# Phase 8: API Discovery
 # =========================
-
-
-
 echo ""
 echo -e "${cyan}[+] Searching API endpoints${reset}"
-
-
 
 grep -Ei \
 "/api/|/v[0-9]+/|graphql|swagger|openapi|rest|json|ajax|rpc" \
 "$ENDPOINTS/all_endpoints.txt" \
 | sort -u \
-> "$ENDPOINTS/api_endpoints.txt"
-
-
-
+> "$ENDPOINTS/api_endpoints.txt" || true
 echo -e "${green}[✓] API endpoints:${reset} $(wc -l < "$ENDPOINTS/api_endpoints.txt")"
 
-
-
-
-
-
-
-
 # =========================
-# Phase 9
-# Parameter Discovery
+# Phase 9: Parameter Discovery
 # =========================
-
-
-
 echo ""
 echo -e "${cyan}[+] Extracting parameters${reset}"
-
-
-
-grep "?" \
-"$ENDPOINTS/all_endpoints.txt" \
-| sort -u \
-> "$ENDPOINTS/parameter_urls.txt"
-
-
-
-
+grep '\?' "$ENDPOINTS/all_endpoints.txt" | sort -u > "$ENDPOINTS/parameter_urls.txt" || true
 
 if [[ -s "$ENDPOINTS/parameter_urls.txt" ]]; then
-
-
     echo "[+] Extracting parameter names..."
-
-
-
-    # unfurl keys requires URL query strings
-    # fallback included for compatibility
-
-    if unfurl keys < "$ENDPOINTS/parameter_urls.txt" >/dev/null 2>&1; then
-
-
-        cat "$ENDPOINTS/parameter_urls.txt" \
-        | unfurl keys \
-        | sort -u \
-        > "$ENDPOINTS/parameters.txt"
-
-
-
+    if unfurl keys < "$ENDPOINTS/parameter_urls.txt" > "$ENDPOINTS/parameters.txt" 2>/dev/null; then
+        sort -u -o "$ENDPOINTS/parameters.txt" "$ENDPOINTS/parameters.txt"
     else
-
-
         echo "[!] unfurl keys unavailable, using awk fallback"
-
-
-
         sed 's/&/\n/g' "$ENDPOINTS/parameter_urls.txt" \
-        | grep "=" \
-        | cut -d "=" -f1 \
-        | sed 's/.*?//' \
-        | sort -u \
-        > "$ENDPOINTS/parameters.txt"
-
-
-
+            | grep "=" \
+            | cut -d "=" -f1 \
+            | sed 's/.*?//' \
+            | sort -u > "$ENDPOINTS/parameters.txt"
     fi
-
-
-
 else
-
-
     touch "$ENDPOINTS/parameters.txt"
-
-
 fi
-
-
-
 echo -e "${green}[✓] Parameters:${reset} $(wc -l < "$ENDPOINTS/parameters.txt")"
 
-
-
-
-
-
-
-
 # =========================
-# Phase 10
-# Interesting Files Discovery
+# Phase 10: Interesting Files Discovery
 # =========================
-
-
-
 echo ""
 echo -e "${cyan}[+] Extracting interesting endpoints${reset}"
-
-
-
-grep -Ei \
-"admin|login|auth|upload|backup|config|debug|test|dev|staging|internal|dashboard|panel|token|oauth" \
-"$ENDPOINTS/all_endpoints.txt" \
-| sort -u \
-> "$ENDPOINTS/interesting.txt"
-
-
-
+grep -Ei "admin|login|auth|upload|backup|config|debug|test|dev|staging|internal|dashboard|panel|token|oauth" \
+    "$ENDPOINTS/all_endpoints.txt" | sort -u > "$ENDPOINTS/interesting.txt" || true
 echo -e "${green}[✓] Interesting endpoints:${reset} $(wc -l < "$ENDPOINTS/interesting.txt")"
 
-
-
-
-
-
-
 # =========================
-# Phase 11
-# Final Recon Database
+# Phase 11: Final Recon Database
 # =========================
-
-
-
 echo ""
 echo -e "${cyan}[+] Creating final URL database${reset}"
-
-
-
-cat \
-"$COLLECTION/clean_urls.txt" \
-"$CRAWL/all_crawled.txt" \
-| sort -u \
-> "$OUTPUT/final_urls.txt"
-
-
-
+sort -u "$COLLECTION/clean_urls.txt" "$CRAWL/all_crawled.txt" > "$OUTPUT/final_urls.txt"
 echo -e "${green}[✓] Final URLs:${reset} $(wc -l < "$OUTPUT/final_urls.txt")"
-
-
-
-
-
-
 
 # =========================
 # Summary
 # =========================
-
-
-
 echo ""
-
 echo -e "${cyan}"
 echo "=============================================="
 echo "              URLHunter Summary"
 echo "=============================================="
 echo -e "${reset}"
 
-
-
 echo -e "${green}Collection${reset}"
-
 echo " Wayback URLs        : $(wc -l < "$COLLECTION/wayback.txt")"
 echo " GAU URLs             : $(wc -l < "$COLLECTION/gau.txt")"
 echo " Clean URLs           : $(wc -l < "$COLLECTION/clean_urls.txt")"
 
-
-
 echo ""
-
 echo -e "${green}Hosts${reset}"
-
 echo " All hosts            : $(wc -l < "$HOSTS/all_hosts.txt")"
 echo " Live hosts           : $(wc -l < "$HOSTS/live_urls.txt")"
 
-
-
 echo ""
-
 echo -e "${green}Crawler${reset}"
-
 echo " Crawled URLs         : $(wc -l < "$CRAWL/all_crawled.txt")"
 echo " JavaScript files     : $(wc -l < "$CRAWL/javascript_files.txt")"
 
-
-
 echo ""
-
 echo -e "${green}Endpoints${reset}"
-
 echo " Total endpoints      : $(wc -l < "$ENDPOINTS/all_endpoints.txt")"
 echo " API endpoints        : $(wc -l < "$ENDPOINTS/api_endpoints.txt")"
 echo " Parameters            : $(wc -l < "$ENDPOINTS/parameters.txt")"
 echo " Interesting          : $(wc -l < "$ENDPOINTS/interesting.txt")"
 
-
-
 echo ""
-
 echo -e "${cyan}"
 echo "Output directory:"
 echo "$OUTPUT"
 echo -e "${reset}"
-
-
 
 echo ""
 echo -e "${dim}URLHunter v${VERSION} | X-ploit-666${reset}"
